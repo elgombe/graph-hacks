@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from redis.exceptions import ResponseError
 
-from . import config
+from . import config, derive
 from .db import get_graph
 from .github import GitHub
 from .ingest import RefCollector, finish, ingest_repo
@@ -35,7 +35,12 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print(f"{repo} (since {since:%Y-%m-%d})")
         ingest_repo(g, gh, repo, refs, since=since, max_prs=args.max_prs)
     finish(g, refs)
+    print(f"derived edges: {derive.rebuild(g)}")
     print(f"done in {time.time() - started:.0f}s, {gh.calls} GitHub API calls, graph '{g.name}'")
+
+
+def cmd_derive(args: argparse.Namespace) -> None:
+    print(f"derived edges: {derive.rebuild(get_graph(args.tenant))}")
 
 
 def cmd_stats(args: argparse.Namespace) -> None:
@@ -67,6 +72,10 @@ def main() -> None:
     ing.add_argument("--tenant", help="graph tenant, default: the repos' owner")
     ing.add_argument("--refresh", action="store_true", help="ignore the GitHub page cache")
     ing.set_defaults(fn=cmd_ingest)
+
+    dv = sub.add_parser("derive", help="rebuild CO_CHANGED and COLLABORATED edges")
+    dv.add_argument("--tenant", default="FalkorDB")
+    dv.set_defaults(fn=cmd_derive)
 
     st = sub.add_parser("stats", help="node and edge counts")
     st.add_argument("--tenant", default="FalkorDB")

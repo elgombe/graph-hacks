@@ -97,6 +97,17 @@ and citations. A post-check rejects any entity the model names that isn't in the
 - FalkorDB in Docker locally (Browser on :3000 for inspecting). Deploy: Railway (FalkorDB container with a volume + app container).
   Fallback: local setup + demo video, which the rules allow.
 
+## FalkorDB notes (tested on 4.22)
+
+- `shortestPath()` only works on directed patterns. For "how is A connected to B" use
+  `CALL algo.SPpaths({sourceNode, targetNode, relTypes, relDirection: 'both', maxLen}) YIELD path, pathWeight`.
+- `algo.pageRank(label, relType) YIELD node, score` takes positional args, not a config map.
+- `algo.betweenness({nodeLabels, relationshipTypes, samplingSize, samplingSeed}) YIELD node, score` follows
+  edge direction, so derived edges (COLLABORATED, CO_CHANGED) are written in both directions.
+- `algo.labelPropagation({nodeLabels, relationshipTypes, maxIterations}) YIELD node, communityId` ignores weights:
+  filter CO_CHANGED by a minimum weight before running it.
+- The Docker image ships with a 1000 ms default query TIMEOUT; long writes pass `timeout=` per query.
+
 ## Schedule
 
 | Day | Goal | Done when |

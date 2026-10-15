@@ -6,6 +6,7 @@ and the raw data stays inspectable under data/cache/.
 
 import hashlib
 import json
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -28,6 +29,7 @@ class GitHub:
         self.cache_dir = cache_dir
         self.refresh = refresh
         self.calls = 0
+        self._lock = threading.Lock()  # pages are fetched from several threads
         cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _cache_file(self, url: str, params: dict | None) -> Path:
@@ -40,13 +42,20 @@ class GitHub:
             page = json.loads(cache.read_text(encoding="utf-8"))
             return page["data"], page["next"]
 
-        for attempt in range(4):
-            resp = self.http.get(url, params=params)
-            self.calls += 1
+        resp = None
+        for attempt in range(5):
+            try:
+                resp = self.http.get(url, params=params)
+            except httpx.TransportError:  # dropped connections and timeouts
+                time.sleep(2**attempt)
+                continue
+            with self._lock:
+                self.calls += 1
             if resp.status_code in (403, 429):
                 if resp.headers.get("x-ratelimit-remaining") == "0":
                     reset = int(resp.headers.get("x-ratelimit-reset", "0"))
-                    raise RateLimited(f"GitHub rate limit hit; resets at {time.ctime(reset)}. Set GITHUB_TOKEN.")
+                    raise RateLimited(f"GitHub rate limit hit; resets at {time.ctime(reset)}. "
+                                      "Re-run then: cached pages are reused.")
                 time.sleep(int(resp.headers.get("retry-after", "10")) * (attempt + 1))
                 continue
             if resp.status_code >= 500:
@@ -57,7 +66,8 @@ class GitHub:
             nxt = resp.links.get("next", {}).get("url")
             cache.write_text(json.dumps({"url": url, "params": params, "data": data, "next": nxt}), encoding="utf-8")
             return data, nxt
-        resp.raise_for_status()
+        if resp is not None:
+            resp.raise_for_status()
         raise RuntimeError(f"GitHub request kept failing: {url}")
 
     def get(self, path: str, params: dict | None = None) -> object:

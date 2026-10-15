@@ -8,6 +8,7 @@ between tickets. Every write is an idempotent MERGE, so re-running is safe.
 import re
 from collections import defaultdict
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from falkordb import Graph
@@ -17,7 +18,7 @@ from .github import GitHub
 
 BODY_MAX = 6000
 COMMENT_MAX = 3000
-KNOWN_BOTS = ["coderabbitai", "codecov", "sonarqubecloud", "github-actions", "dependabot", "renovate", "copilot"]
+DEPENDENCY_BOTS = ("dependabot", "renovate")
 
 URL_REF = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/(?:issues|pull)/(\d+)")
 SHORT_REF = re.compile(r"(?<![\w/#&.-])(?:(\w[\w.-]*)/([\w.-]+))?#(\d+)\b")
@@ -192,12 +193,6 @@ MATCH (a:Release {key: row.src}), (b:Ticket {key: row.dst})
 MERGE (a)-[:INCLUDES]->(b)
 """
 
-BOT_Q = """
-MATCH (p:Person)
-WHERE p.login ENDS WITH '[bot]' OR toLower(p.login) IN $bots
-SET p.bot = true
-"""
-
 
 # ---------------------------------------------------------------- loader
 
@@ -279,12 +274,21 @@ def ingest_repo(
                             "draft": pr.get("draft", False), "base": pr["base"]["ref"], "author": login(pr.get("user"))})
     write_batches(g, PR_META_Q, pr_meta)
 
-    # Per-PR detail: changed files and reviews (two API calls per PR).
-    detailed = pr_meta[:max_prs] if max_prs else pr_meta
+    # Per-PR detail: changed files and reviews (two API calls per PR). Dependency
+    # bumps are skipped; agent-written PRs (e.g. Copilot) are kept because humans review them.
+    wanted = [pr for pr in pr_meta if not pr["author"].lower().startswith(DEPENDENCY_BOTS)]
+    detailed = wanted[:max_prs] if max_prs else wanted
+
+    def fetch(pr: dict) -> tuple[dict, list[dict], list[dict]]:
+        num = pr["number"]
+        return pr, list(gh.paginate(f"{base}/pulls/{num}/files")), list(gh.paginate(f"{base}/pulls/{num}/reviews"))
+
     files, dirs, touches, renames, reviews, sizes = {}, {}, [], [], [], []
-    for pr in detailed:
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        fetched = list(pool.map(fetch, detailed))
+    for pr, pr_files, pr_reviews in fetched:
         adds = dels = count = 0
-        for f in gh.paginate(f"{base}/pulls/{pr['number']}/files"):
+        for f in pr_files:
             for path in filter(None, [f["filename"], f.get("previous_filename")]):
                 _add_file(repo, path, files, dirs)
             touches.append({"pr": pr["key"], "file": file_key(repo, f["filename"]),
@@ -295,7 +299,7 @@ def ingest_repo(
         sizes.append({"key": pr["key"], "file_count": count, "additions": adds, "deletions": dels})
 
         by_reviewer: dict[str, list[dict]] = defaultdict(list)
-        for rv in gh.paginate(f"{base}/pulls/{pr['number']}/reviews"):
+        for rv in pr_reviews:
             who = login(rv.get("user"))
             if who != pr["author"]:
                 by_reviewer[who].append(rv)
@@ -366,4 +370,3 @@ def _add_file(repo: str, path: str, files: dict, dirs: dict) -> None:
 
 def finish(g: Graph, refs: RefCollector) -> None:
     refs.link(g)
-    g.query(BOT_Q, {"bots": KNOWN_BOTS})
