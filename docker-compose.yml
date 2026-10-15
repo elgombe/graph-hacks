@@ -1,0 +1,20 @@
+# Local dev: FalkorDB server on 6379 + FalkorDB Browser on http://localhost:3000
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports:
+      - "6379:6379"
+      - "3000:3000"
+    environment:
+      - REDIS_ARGS=--appendonly yes
+    volumes:
+      - falkordb_data:/var/lib/falkordb/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  falkordb_data:

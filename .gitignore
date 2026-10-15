@@ -1,0 +1,28 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# node
+node_modules/
+dist/
+
+# local data and caches
+data/cache/
+*.log
+
+# editors / tools / OS
+.claude/
+CLAUDE.md
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
