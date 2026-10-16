@@ -14,7 +14,9 @@ FALKORDB_PASSWORD = os.getenv("FALKORDB_PASSWORD") or None
 
 CACHE_DIR = ROOT / "data" / "cache"
 
-AGENT_MODEL = os.getenv("AGENT_MODEL", "gemini-flash-latest")
-EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "gemini-flash-lite-latest")
+# Tried in order; the free tier often answers 503 "high demand" for the newest model.
+AGENT_MODELS = os.getenv("AGENT_MODELS", "gemini-3.6-flash,gemini-3.5-flash,gemini-flash-lite-latest").split(",")
+EXTRACT_MODELS = os.getenv(
+    "EXTRACT_MODELS", "gemini-flash-lite-latest,gemini-3.1-flash-lite,gemini-3.5-flash").split(",")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "gemini-embedding-2")
 EMBED_DIM = 768

@@ -1,10 +1,11 @@
 import argparse
+import json
 import time
 from datetime import datetime, timedelta, timezone
 
 from redis.exceptions import ResponseError
 
-from . import config, derive
+from . import config, derive, embeddings, tools
 from .db import get_graph
 from .github import GitHub
 from .ingest import RefCollector, finish, ingest_repo
@@ -36,11 +37,23 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         ingest_repo(g, gh, repo, refs, since=since, max_prs=args.max_prs)
     finish(g, refs)
     print(f"derived edges: {derive.rebuild(g)}")
+    if config.GEMINI_API_KEY:
+        embeddings.embed_tickets(g)
     print(f"done in {time.time() - started:.0f}s, {gh.calls} GitHub API calls, graph '{g.name}'")
 
 
 def cmd_derive(args: argparse.Namespace) -> None:
     print(f"derived edges: {derive.rebuild(get_graph(args.tenant))}")
+
+
+def cmd_embed(args: argparse.Namespace) -> None:
+    print(f"embedded {embeddings.embed_tickets(get_graph(args.tenant))} tickets")
+
+
+def cmd_curate(args: argparse.Namespace) -> None:
+    from .curator import curate
+
+    curate(get_graph(args.tenant), limit=args.limit)
 
 
 def cmd_stats(args: argparse.Namespace) -> None:
@@ -61,6 +74,34 @@ def cmd_query(args: argparse.Namespace) -> None:
         print(" | ".join(str(v) for v in row))
 
 
+def cmd_tool(args: argparse.Namespace) -> None:
+    if not args.name:
+        for t in tools.CATALOGUE.values():
+            print(f"{t.name}({', '.join(t.params)})\n    {t.description}\n")
+        return
+    params = dict(kv.split("=", 1) for kv in args.args)
+    started = time.time()
+    result = tools.run(get_graph(args.tenant), args.name, params)
+    print(json.dumps(result.for_llm(), indent=2, ensure_ascii=False))
+    ev = result.evidence.to_json()
+    print(f"-- {len(ev['nodes'])} evidence nodes, {len(ev['edges'])} edges, {(time.time() - started) * 1000:.0f} ms")
+
+
+def cmd_ask(args: argparse.Namespace) -> None:
+    from .agent import CITE, ask  # imported lazily: the Gemini SDK is slow to load
+
+    started = time.time()
+    answer = ask(args.question, tenant=args.tenant)
+    print(CITE.sub(lambda m: m.group(1), answer.text).strip())
+    print(f"\n-- trace ({answer.outcome}, {answer.model}, {time.time() - started:.1f}s)")
+    for s in answer.steps:
+        print(f"   {s.tool}({', '.join(f'{k}={v!r}' for k, v in s.args.items())}) -> {s.rows} rows, {s.ms} ms"
+              + (f"  [{s.note}]" if s.note else ""))
+    ev = answer.evidence.to_json()
+    print(f"-- evidence: {len(ev['nodes'])} nodes, {len(ev['edges'])} edges; cited {len(answer.cited)}"
+          + (f"; UNVERIFIED: {answer.unverified}" if answer.unverified else ""))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="repobrain")
     sub = p.add_subparsers(required=True)
@@ -77,9 +118,29 @@ def main() -> None:
     dv.add_argument("--tenant", default="FalkorDB")
     dv.set_defaults(fn=cmd_derive)
 
+    cu = sub.add_parser("curate", help="extract decisions from the most-discussed threads")
+    cu.add_argument("--limit", type=int, default=250, help="threads to read (cached ones are free)")
+    cu.add_argument("--tenant", default="FalkorDB")
+    cu.set_defaults(fn=cmd_curate)
+
+    em = sub.add_parser("embed", help="embed tickets that have no vector yet")
+    em.add_argument("--tenant", default="FalkorDB")
+    em.set_defaults(fn=cmd_embed)
+
     st = sub.add_parser("stats", help="node and edge counts")
     st.add_argument("--tenant", default="FalkorDB")
     st.set_defaults(fn=cmd_stats)
+
+    ak = sub.add_parser("ask", help="ask the agent a question in plain English")
+    ak.add_argument("question")
+    ak.add_argument("--tenant", default="FalkorDB")
+    ak.set_defaults(fn=cmd_ask)
+
+    tl = sub.add_parser("tool", help="run one agent tool directly, e.g. tool who_knows target=src/execution_plan")
+    tl.add_argument("name", nargs="?", help="tool name (omit to list tools)")
+    tl.add_argument("args", nargs="*", help="key=value arguments")
+    tl.add_argument("--tenant", default="FalkorDB")
+    tl.set_defaults(fn=cmd_tool)
 
     q = sub.add_parser("query", help="run a read-only Cypher query")
     q.add_argument("cypher")
