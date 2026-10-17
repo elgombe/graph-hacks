@@ -13,7 +13,7 @@ always showing the path through the graph behind the answer.
 **Live demo:** https://repo-brain-production.up.railway.app · MCP endpoint: `https://repo-brain-production.up.railway.app/mcp/`
 
 The demo graph is the public [FalkorDB org](https://github.com/FalkorDB) itself: 7 repos, last 12 months,
-about 40k nodes and 180k relationships.
+about 40k nodes and 160k relationships.
 
 ## Quickstart
 
