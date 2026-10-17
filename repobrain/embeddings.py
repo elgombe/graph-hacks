@@ -1,46 +1,51 @@
 """Vector embeddings for semantic search, stored on the nodes themselves.
 
-Tickets get a 768-d Gemini embedding of title + body in `embedding`, indexed with a
-FalkorDB vector index, so search can combine meaning (vector) with keywords (full-text).
+Tickets (title + start of body) and decisions (summary + rationale) get 768-d Gemini
+embeddings in `embedding`, indexed with FalkorDB vector indexes, so search can combine
+meaning (vector) with keywords (full-text). Only nodes without a vector are embedded.
 """
 
 from falkordb import Graph
 
 from . import config
-from .db import WRITE_TIMEOUT_MS
+from .db import WRITE_TIMEOUT_MS, write_batches
 from .llm import embed
 
 BATCH = 100
-BODY_CHARS = 1500
+BODY_CHARS = 800
 
-PENDING_Q = """
-MATCH (t:Ticket) WHERE t.embedding IS NULL AND t.dependency_bump IS NULL
-RETURN t.key, t.title, t.body
-"""
+TARGETS = {
+    # label: (key property, query returning key + text for nodes still missing a vector).
+    # Decisions first and busiest tickets first, so a quota cut-off loses the least useful nodes.
+    "Decision": ("id", """MATCH (d:Decision) WHERE d.embedding IS NULL
+                          RETURN d.id, d.summary + ' ' + coalesce(d.rationale, '')"""),
+    "Ticket": ("key", """MATCH (t:Ticket) WHERE t.embedding IS NULL AND t.dependency_bump IS NULL
+                         RETURN t.key, t.title + '\n\n' + left(coalesce(t.body, ''), $chars)
+                         ORDER BY t.comment_count DESC, t.updated_at DESC"""),
+}
 
-WRITE_Q = """
-UNWIND $rows AS row
-MATCH (t:Ticket {key: row.key})
-SET t.embedding = vecf32(row.vec)
-"""
 
-
-def ensure_index(g: Graph) -> None:
+def ensure_index(g: Graph, label: str) -> None:
     try:
-        g.create_node_vector_index("Ticket", "embedding", dim=config.EMBED_DIM, similarity_function="cosine")
+        g.create_node_vector_index(label, "embedding", dim=config.EMBED_DIM, similarity_function="cosine")
     except Exception as e:
         if "already" not in str(e).lower():
             raise
 
 
-def embed_tickets(g: Graph, log=print) -> int:
-    ensure_index(g)
-    pending = g.ro_query(PENDING_Q, timeout=WRITE_TIMEOUT_MS).result_set
+def embed_missing(g: Graph, label: str, log=print) -> int:
+    key, pending_q = TARGETS[label]
+    ensure_index(g, label)
+    pending = g.ro_query(pending_q, {"chars": BODY_CHARS}, timeout=WRITE_TIMEOUT_MS).result_set
+    write_q = f"UNWIND $rows AS row MATCH (n:{label} {{{key}: row.key}}) SET n.embedding = vecf32(row.vec)"
     for i in range(0, len(pending), BATCH):
         chunk = pending[i : i + BATCH]
-        vectors = embed([f"{title}\n\n{(body or '')[:BODY_CHARS]}" for _, title, body in chunk])
-        rows = [{"key": key, "vec": vec} for (key, _, _), vec in zip(chunk, vectors)]
-        for j in range(0, len(rows), 25):  # vectors make big query strings; keep writes small
-            g.query(WRITE_Q, {"rows": rows[j : j + 25]}, timeout=WRITE_TIMEOUT_MS)
-        log(f"  embedded {min(i + BATCH, len(pending))}/{len(pending)} tickets")
+        vectors = embed([text for _, text in chunk])
+        # vectors make big query strings, so keep each write small
+        write_batches(g, write_q, [{"key": k, "vec": v} for (k, _), v in zip(chunk, vectors)], size=25)
+        log(f"  embedded {min(i + BATCH, len(pending))}/{len(pending)} {label} nodes")
     return len(pending)
+
+
+def embed_all(g: Graph, log=print) -> dict[str, int]:
+    return {label: embed_missing(g, label, log) for label in TARGETS}

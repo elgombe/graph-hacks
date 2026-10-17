@@ -8,12 +8,13 @@ so the agent cannot name people, tickets or files it did not actually find.
 
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 
 from google.genai import errors, types
 
-from . import config, tools
+from . import config, memory, tools  # importing memory registers the recall / remember tools
 from .db import get_graph
 from .evidence import Evidence
 from .llm import client
@@ -49,6 +50,15 @@ class Step:
     note: str = ""
 
 
+USER_BLOCK = """
+
+About the person asking (user {user}), from their memory in the graph:
+- They asked you to remember: {facts}
+- Their recent questions mostly involved: {interests}
+Use recall when they refer to earlier conversations or to themselves. Use remember only when they
+explicitly ask you to remember something."""
+
+
 @dataclass
 class Answer:
     question: str
@@ -59,15 +69,15 @@ class Answer:
     unverified: list[str] = field(default_factory=list)
     outcome: str = "answered_with_path"  # | not_in_graph | no_tools_used | step_limit
     model: str = ""
-    history: list[types.Content] = field(default_factory=list, repr=False)  # for follow-up questions
+    turn_id: str | None = None
 
 
-def _config(tenant: str, allow_tools: bool = True) -> types.GenerateContentConfig:
+def _config(system: str, allow_tools: bool = True) -> types.GenerateContentConfig:
     decls = [types.FunctionDeclaration(name=d["name"], description=d["description"],
                                        parameters_json_schema=d["parameters"]) for d in tools.declarations()]
     mode = types.FunctionCallingConfigMode.AUTO if allow_tools else types.FunctionCallingConfigMode.NONE
     return types.GenerateContentConfig(
-        system_instruction=SYSTEM.format(tenant=tenant, today=date.today().isoformat()),
+        system_instruction=system,
         thinking_config=types.ThinkingConfig(thinking_level="low"),  # tool routing needs little deliberation
         tools=[types.Tool(function_declarations=decls)],
         tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode=mode)),
@@ -94,28 +104,42 @@ def _generate(contents: list[types.Content], cfg: types.GenerateContentConfig,
     raise RuntimeError("Gemini is overloaded right now; try again in a minute")
 
 
-def ask(question: str, tenant: str = "FalkorDB", history: list[types.Content] | None = None) -> Answer:
+def _text(role: str, text: str) -> types.Content:
+    return types.Content(role=role, parts=[types.Part.from_text(text=text)])
+
+
+def ask(question: str, tenant: str = "FalkorDB", user: str | None = None, session: str | None = None,
+        on_step: Callable[[Step], None] | None = None) -> Answer:
+    """Answer one question. With a user, the agent reads and writes that user's memory; with a
+    session too, earlier turns of the session are replayed as plain text (model-independent)."""
     g = get_graph(tenant)
     answer = Answer(question=question, text="")
-    contents = [*(history or []), types.Content(role="user", parts=[types.Part.from_text(text=question)])]
+    system = SYSTEM.format(tenant=tenant, today=date.today().isoformat())
+    contents: list[types.Content] = []
+    if user:
+        _ensure_memory(g)
+        ctx = memory.user_context(g, user)
+        system += USER_BLOCK.format(user=user, facts="; ".join(ctx["facts"]) or "nothing yet",
+                                    interests=", ".join(ctx["interests"]) or "nothing yet")
+        for q, a in memory.session_history(g, user, session) if session else []:
+            contents += [_text("user", q), _text("model", a)]
+    contents.append(_text("user", question))
 
     model = None
     for _ in range(MAX_STEPS):
-        resp, model = _generate(contents, _config(tenant), model)
+        resp, model = _generate(contents, _config(system), model)
         content = resp.candidates[0].content
-        contents.append(content)  # keeps the model's thought signatures for the next turn
+        contents.append(content)  # keeps the model's thought signatures for the next step
         calls = [p.function_call for p in content.parts or [] if p.function_call]
         if not calls:
             answer.text = resp.text or ""
             break
-        replies = []
-        for call in calls:
-            replies.append(_run_tool(g, call.name, dict(call.args or {}), answer))
+        replies = [_run_tool(g, c.name, dict(c.args or {}), answer, user, on_step) for c in calls]
         contents.append(types.Content(role="user", parts=replies))
     else:
         # Out of steps: answer from what was gathered, with tools switched off.
         answer.outcome = "step_limit"
-        answer.text = _generate(contents, _config(tenant, allow_tools=False), model)[0].text or ""
+        answer.text = _generate(contents, _config(system, allow_tools=False), model)[0].text or ""
     answer.model = model or ""
 
     _check_citations(answer)
@@ -123,19 +147,34 @@ def ask(question: str, tenant: str = "FalkorDB", history: list[types.Content] | 
         answer.outcome = "no_tools_used"
     elif not answer.evidence.nodes:
         answer.outcome = "not_in_graph"
-    answer.history = contents
+    if user and session:
+        answer.turn_id = memory.record_turn(g, user, session, question, answer.text, answer.outcome, answer.model,
+                                            [vars(s) for s in answer.steps], answer.cited)
     return answer
 
 
-def _run_tool(g, name: str, args: dict, answer: Answer) -> types.Part:
+_memory_ready: set[str] = set()
+
+
+def _ensure_memory(g) -> None:
+    if g.name not in _memory_ready:
+        memory.ensure_schema(g)
+        _memory_ready.add(g.name)
+
+
+def _run_tool(g, name: str, args: dict, answer: Answer, user: str | None,
+              on_step: Callable[[Step], None] | None) -> types.Part:
     started = time.perf_counter()
     try:
-        result = tools.run(g, name, args)
+        result = tools.run(g, name, args, user=user)
         payload, rows, note = result.for_llm(), len(result.rows), result.note
         answer.evidence.merge(result.evidence)
     except Exception as e:  # a failing tool becomes a message to the model, not a crash
         payload, rows, note = {"error": str(e)[:300]}, 0, "error"
-    answer.steps.append(Step(name, args, rows, int((time.perf_counter() - started) * 1000), note))
+    step = Step(name, args, rows, int((time.perf_counter() - started) * 1000), note)
+    answer.steps.append(step)
+    if on_step:
+        on_step(step)
     return types.Part.from_function_response(name=name, response=payload)
 
 

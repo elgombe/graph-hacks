@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 from falkordb import Edge, Node, Path
 
 # Most specific label first: a PR node carries both Ticket and PR.
-KINDS = ["Person", "Issue", "PR", "File", "Dir", "Repo", "Comment", "Release", "Label", "Decision", "Topic"]
+KINDS = ["Person", "Issue", "PR", "File", "Dir", "Repo", "Comment", "Release", "Label", "Decision", "Topic",
+         "Turn", "Fact", "Task", "Agent"]
+ID_PREFIX = {"Comment": "comment", "Decision": "decision", "Turn": "turn", "Fact": "fact", "Task": "task"}
 
 
 def node_kind(n: Node) -> str:
@@ -26,10 +28,8 @@ def cite_id(n: Node) -> str:
         return p["key"]
     if kind == "Repo":
         return p["name"]
-    if kind == "Comment":
-        return f"comment:{p['id']}"
-    if kind == "Decision":
-        return f"decision:{p['id']}"
+    if kind in ID_PREFIX:
+        return f"{ID_PREFIX[kind]}:{p['id']}"
     return f"{kind.lower()}:{p.get('name', n.id)}"
 
 
@@ -43,6 +43,12 @@ def display(n: Node) -> str:
         return p["login"]
     if kind == "Decision":
         return p.get("summary", "")
+    if kind == "Turn":
+        return p.get("question", "")
+    if kind == "Fact":
+        return p.get("text", "")
+    if kind == "Task":
+        return f"{p.get('kind', 'task')} ({p.get('status', '')})"
     return str(p.get("name") or p.get("tag") or p.get("id") or cite_id(n))
 
 

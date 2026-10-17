@@ -22,21 +22,26 @@ python -m venv .venv
 cp .env.example .env                      # add GEMINI_API_KEY and GITHUB_TOKEN
 .venv/Scripts/python -m repobrain ingest  # core FalkorDB repos, last 12 months (+ derive + embed)
 .venv/Scripts/python -m repobrain curate  # Curator agent: extract decisions from discussions
-.venv/Scripts/python -m repobrain ask "Who should review a change to src/execution_plan?"
+.venv/Scripts/python -m repobrain serve   # web UI on http://localhost:8000, MCP on /mcp/
 ```
 
-Other commands: `stats`, `derive`, `embed`, `tool <name> key=value ...` (run one agent tool directly),
+From the terminal: `ask "<question>" [--user U --session S]`, `tool <name> key=value ...` (run one agent
+tool directly), `sync` (incremental update), `mcp` (MCP over stdio), `stats`, `derive`, `embed`,
 `query "<cypher>"` (read-only).
 
 ## How it works
 
 ```
-GitHub API ──ingest──▶ FalkorDB graph ◀──derive── co-change, collaboration, LINK projections
-                          ▲      ▲
-               Curator agent      Analyst agent (Gemini function calling)
-     reads threads, writes        picks graph tools ─▶ parameterised Cypher + algorithms
-     Decision nodes with          ─▶ evidence subgraph ─▶ answer with [[citations]]
-     provenance                   ─▶ post-check: every citation must exist in the evidence
+GitHub API ──ingest / sync──▶ FalkorDB graph ◀──derive── co-change, collaboration, LINK projections
+                                 ▲   ▲   ▲
+     Curator agent ──────────────┘   │   └────────────── Analyst agent (Gemini function calling)
+     reads threads → Decision nodes  │                   picks graph tools → Cypher + algorithms
+     queues new issues → Task nodes  │                   → evidence subgraph → answer with [[citations]]
+                                     │                   → post-check: citations must be in the evidence
+     Analyst workers ────────────────┘                   → writes the turn to the user's memory
+     claim Tasks, triage from the graph, write results back
+
+     Web UI (chat + evidence graph + tool trace, triage inbox, memory)  ·  MCP server (same tools)
 ```
 
 * **The graph is the product.** Every answer is a traversal or a graph algorithm. Remove FalkorDB and nothing is left.
@@ -61,6 +66,15 @@ Decisions (written by the Curator agent)
 (Decision)-[:SOURCED_FROM]->(Comment | Ticket)      (Person)-[:DECIDED]->(Decision)
 (Decision)-[:ABOUT]->(Topic)
 
+Agent memory (per user)
+(User)-[:HAD]->(Session)-[:INCLUDES]->(Turn {question, answer, trace})-[:CITED]->(Person | Ticket | File | ...)
+(User)-[:NOTED]->(Fact {text})-[:ABOUT]->(...)
+
+Agent coordination (Curator -> Analyst handoff)
+(Agent {name: 'curator'})-[:CREATED]->(Task {kind: 'triage', status})-[:FOR]->(Issue)
+(Agent {name: 'analyst-2'})-[:CLAIMED | COMPLETED]->(Task)
+(Task)-[:RELATED]->(Ticket)   (Task)-[:SUGGESTS]->(Person)   (Task)-[:LIKELY_TOUCHES]->(File)   (Task)-[:SEE]->(Decision)
+
 Derived (rebuilt after every sync, written in both directions)
 (File)-[:CO_CHANGED {weight}]->(File)      files changed in the same PRs
 (File)-[:COUPLED {weight}]->(File)         CO_CHANGED with weight >= 3
@@ -68,9 +82,51 @@ Derived (rebuilt after every sync, written in both directions)
 (a)-[:LINK]->(b)                            one undirected hop per real event edge
 ```
 
-Indexes: range indexes on every key, full-text on ticket titles/bodies and comments, and vector indexes
-(768-d Gemini embeddings, cosine) on `Ticket.embedding` and `Decision.embedding`.
+Indexes: range indexes on every key, full-text on ticket titles/bodies, comments, turns and facts, and
+vector indexes (cosine) on `Ticket.embedding` and `Decision.embedding`. Embeddings are 384-d
+`BAAI/bge-small-en-v1.5` computed locally with fastembed (no API quota, ~10 minutes for the whole graph on a
+laptop CPU); set `EMBED_PROVIDER=gemini` to use Gemini embeddings instead.
 Each GitHub org is its own graph (`brain:<org>`), so tenants are fully isolated.
+
+## Memory and coordination (Track 2)
+
+**Memory lives in the same graph as the knowledge.** Every answered question becomes a `Turn` linked with
+`CITED` edges to the people, tickets and files the answer rested on. That makes memory traversable:
+"what did I ask about this file?" is a graph query, a user's interests fall out of their `CITED` edges,
+and facts the user asks the agent to `remember` are linked to the entities they are about. Each new
+question starts with the user's facts and interests in context, and the session's earlier turns replayed.
+Memory is scoped per user by an id the server passes in (the model never chooses whose memory it reads),
+and per tenant because each org is its own graph.
+
+**Agents coordinate only through the graph.** The Curator queues new open issues as `Task` nodes. Any
+number of Analyst workers claim them with one write query:
+
+```cypher
+MATCH (t:Task {kind: 'triage', status: 'open'})
+WITH t ORDER BY t.created_at, t.id LIMIT 1
+SET t.status = 'claimed', t.claimed_by = $agent, t.claimed_at = $now
+MERGE (a:Agent {name: $agent}) CREATE (a)-[:CLAIMED]->(t)
+RETURN t.id
+```
+
+FalkorDB executes write queries on a graph one at a time, so two workers can never claim the same task
+(the UI's "Run 3 analysts" button shows each task claimed exactly once). Triage is pure graph work: related
+tickets from hybrid search, owners from who fixed and reviewed those tickets, likely files from what those
+fixes touched, labels and nearby decisions; the result is written back as edges on the Task.
+
+## MCP server
+
+The same tool catalogue is exposed over MCP, typed from the tools' JSON schemas:
+
+* stdio, for Claude Desktop, Cursor and other desktop clients:
+
+  ```json
+  { "mcpServers": { "repo-brain": {
+      "command": "C:/path/to/graph-hacks/.venv/Scripts/python.exe",
+      "args": ["-m", "repobrain", "mcp"] } } }
+  ```
+
+* streamable HTTP at `http://localhost:8000/mcp/` whenever `repobrain serve` is running.
 
 ## Agent tools and the Cypher behind them
 

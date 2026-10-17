@@ -8,6 +8,10 @@ dependencies = [
     "httpx>=0.28",
     "python-dotenv>=1.0",
     "google-genai>=2.0",
+    "fastembed>=0.9",
+    "fastapi>=0.140",
+    "uvicorn[standard]>=0.50",
+    "mcp>=2.3",
 ]
 
 [build-system]

@@ -15,8 +15,8 @@ __pycache__/
 node_modules/
 dist/
 
-# local data and caches
-data/cache/
+# local data, caches and downloaded models
+data/
 *.log
 
 # editors / tools / OS

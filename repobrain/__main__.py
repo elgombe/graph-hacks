@@ -38,8 +38,33 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     finish(g, refs)
     print(f"derived edges: {derive.rebuild(g)}")
     if config.GEMINI_API_KEY:
-        embeddings.embed_tickets(g)
+        embeddings.embed_all(g)
     print(f"done in {time.time() - started:.0f}s, {gh.calls} GitHub API calls, graph '{g.name}'")
+
+
+def cmd_sync(args: argparse.Namespace) -> None:
+    """Keep the brain current: re-fetch only what changed since the newest ticket we have,
+    then re-link, re-derive, embed new nodes, read new threads and queue new issues for triage."""
+    from . import coord
+    from .curator import curate
+
+    g = get_graph(args.tenant)
+    newest = g.ro_query("MATCH (t:Ticket) RETURN max(t.updated_at)").result_set[0][0]
+    since = datetime.fromtimestamp(newest, timezone.utc) - timedelta(hours=6)  # overlap: MERGE makes it safe
+    repos = [r for (r,) in g.ro_query("MATCH (r:Repo) RETURN r.name").result_set]
+    gh = GitHub(config.GITHUB_TOKEN, config.CACHE_DIR, refresh=True)  # bypass the page cache: we want news
+    refs = RefCollector()
+    started = time.time()
+    for repo in repos:
+        print(f"{repo} (changes since {since:%Y-%m-%d %H:%M} UTC)")
+        ingest_repo(g, gh, repo, refs, since=since)
+    finish(g, refs)
+    print(f"derived edges: {derive.rebuild(g)}")
+    if config.GEMINI_API_KEY:
+        print(f"embedded: {embeddings.embed_all(g)}")
+        curate(g, limit=args.curate)  # threads already read are cached, so only new ones cost a call
+    print(f"queued for triage: {coord.queue_triage(g, n=args.triage)}")
+    print(f"sync done in {time.time() - started:.0f}s, {gh.calls} GitHub API calls")
 
 
 def cmd_derive(args: argparse.Namespace) -> None:
@@ -47,7 +72,7 @@ def cmd_derive(args: argparse.Namespace) -> None:
 
 
 def cmd_embed(args: argparse.Namespace) -> None:
-    print(f"embedded {embeddings.embed_tickets(get_graph(args.tenant))} tickets")
+    print(f"embedded {embeddings.embed_all(get_graph(args.tenant))}")
 
 
 def cmd_curate(args: argparse.Namespace) -> None:
@@ -91,7 +116,7 @@ def cmd_ask(args: argparse.Namespace) -> None:
     from .agent import CITE, ask  # imported lazily: the Gemini SDK is slow to load
 
     started = time.time()
-    answer = ask(args.question, tenant=args.tenant)
+    answer = ask(args.question, tenant=args.tenant, user=args.user, session=args.session)
     print(CITE.sub(lambda m: m.group(1), answer.text).strip())
     print(f"\n-- trace ({answer.outcome}, {answer.model}, {time.time() - started:.1f}s)")
     for s in answer.steps:
@@ -100,6 +125,18 @@ def cmd_ask(args: argparse.Namespace) -> None:
     ev = answer.evidence.to_json()
     print(f"-- evidence: {len(ev['nodes'])} nodes, {len(ev['edges'])} edges; cited {len(answer.cited)}"
           + (f"; UNVERIFIED: {answer.unverified}" if answer.unverified else ""))
+
+
+def cmd_mcp(args: argparse.Namespace) -> None:
+    from .mcp_server import build
+
+    build(args.tenant).run("stdio")
+
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    import uvicorn
+
+    uvicorn.run("repobrain.server:app", host=args.host, port=args.port)
 
 
 def main() -> None:
@@ -118,6 +155,12 @@ def main() -> None:
     dv.add_argument("--tenant", default="FalkorDB")
     dv.set_defaults(fn=cmd_derive)
 
+    sy = sub.add_parser("sync", help="incremental update: fetch what changed since the last ingest")
+    sy.add_argument("--curate", type=int, default=250, help="threads the Curator considers (cached ones are free)")
+    sy.add_argument("--triage", type=int, default=10, help="max new open issues to queue for triage")
+    sy.add_argument("--tenant", default="FalkorDB")
+    sy.set_defaults(fn=cmd_sync)
+
     cu = sub.add_parser("curate", help="extract decisions from the most-discussed threads")
     cu.add_argument("--limit", type=int, default=250, help="threads to read (cached ones are free)")
     cu.add_argument("--tenant", default="FalkorDB")
@@ -131,8 +174,19 @@ def main() -> None:
     st.add_argument("--tenant", default="FalkorDB")
     st.set_defaults(fn=cmd_stats)
 
+    mc = sub.add_parser("mcp", help="run the MCP server over stdio (for Claude Desktop, Cursor, ...)")
+    mc.add_argument("--tenant", default="FalkorDB")
+    mc.set_defaults(fn=cmd_mcp)
+
+    sv = sub.add_parser("serve", help="run the web UI and API")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8000)
+    sv.set_defaults(fn=cmd_serve)
+
     ak = sub.add_parser("ask", help="ask the agent a question in plain English")
     ak.add_argument("question")
+    ak.add_argument("--user", help="user id: enables per-user memory")
+    ak.add_argument("--session", help="session id: earlier turns of the session become context")
     ak.add_argument("--tenant", default="FalkorDB")
     ak.set_defaults(fn=cmd_ask)
 

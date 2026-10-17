@@ -23,7 +23,8 @@ from google.genai import errors, types
 from . import config
 from .db import WRITE_TIMEOUT_MS, write_batches
 from .evidence import day
-from .llm import client, embed
+from .embeddings import embed_missing
+from .llm import client
 
 CACHE = config.CACHE_DIR / "decisions"
 MAX_COMMENTS = 30
@@ -122,13 +123,6 @@ MERGE (tp:Topic {name: row.topic})
 MERGE (d)-[:ABOUT]->(tp)
 """
 
-EMBED_Q = """
-UNWIND $rows AS row
-MATCH (d:Decision {id: row.id})
-SET d.embedding = vecf32(row.vec)
-"""
-
-
 def candidates(g: Graph, limit: int) -> list[str]:
     """Threads most likely to hold decisions: lots of human discussion, design language."""
     scored = []
@@ -210,19 +204,7 @@ def curate(g: Graph, limit: int = 200, workers: int = 4, log=print) -> int:
     write_batches(g, SOURCE_TICKET_Q, ticket_src)
     write_batches(g, DECIDED_BY_Q, deciders)
     write_batches(g, TOPIC_Q, topics)
-    _embed_decisions(g, rows)
+    embed_missing(g, "Decision", log)
     log(f"  {len(rows)} decisions from {sum(1 for _, d in results if d)} of {len(keys)} threads, "
         f"{len({t['topic'] for t in topics})} topics")
     return len(rows)
-
-
-def _embed_decisions(g: Graph, rows: list[dict]) -> None:
-    try:
-        g.create_node_vector_index("Decision", "embedding", dim=config.EMBED_DIM, similarity_function="cosine")
-    except Exception as e:
-        if "already" not in str(e).lower():
-            raise
-    for i in range(0, len(rows), 100):
-        chunk = rows[i : i + 100]
-        vectors = embed([f"{r['summary']} {r['rationale']}" for r in chunk])
-        write_batches(g, EMBED_Q, [{"id": r["id"], "vec": v} for r, v in zip(chunk, vectors)], size=25)

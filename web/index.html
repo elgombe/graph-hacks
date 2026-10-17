@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Repo Brain</title>
+  <meta name="description" content="A company brain for open-source orgs, built on FalkorDB.">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">◈</span>
+      <span class="name">Repo Brain</span>
+      <span class="tenant" id="tenant">FalkorDB org</span>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button data-tab="ask" class="active" role="tab">Ask</button>
+      <button data-tab="inbox" role="tab">Triage inbox</button>
+      <button data-tab="memory" role="tab">Memory</button>
+    </nav>
+    <div class="stats" id="stats"></div>
+  </header>
+
+  <main>
+    <section id="tab-ask" class="tab active">
+      <div class="chat">
+        <div class="messages" id="messages">
+          <div class="empty" id="empty">
+            <h1>Ask the graph.</h1>
+            <p>Answers come from FalkorDB traversals and graph algorithms over a year of the FalkorDB
+              org's GitHub activity. Every claim is cited, and the path behind it is drawn on the right.</p>
+            <div class="suggestions" id="suggestions"></div>
+          </div>
+        </div>
+        <form class="composer" id="composer">
+          <textarea id="q" rows="2" placeholder="Who should review a change to src/execution_plan?"></textarea>
+          <button type="submit" id="send">Ask</button>
+        </form>
+        <div class="session-bar">
+          <span id="session-label"></span>
+          <button id="new-chat" class="link" type="button">New chat</button>
+        </div>
+      </div>
+
+      <div class="evidence">
+        <div class="pane-head">
+          <span>Evidence graph <button id="graph-mode" class="link mode hidden" type="button"></button></span>
+          <div class="legend" id="legend"></div>
+        </div>
+        <div class="graph-wrap">
+          <div id="graph" class="graph"></div>
+          <div class="graph-empty" id="graph-empty">The subgraph behind each answer appears here.<br>Click a node to inspect or expand it.</div>
+          <div class="node-card hidden" id="node-card"></div>
+        </div>
+        <div class="trace" id="trace">
+          <div class="pane-head"><span>Tool trace</span><span id="trace-meta" class="muted"></span></div>
+          <ol id="steps"><li class="muted none">Tool calls appear here as the agent works.</li></ol>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-inbox" class="tab">
+      <div class="inbox-head">
+        <div>
+          <h2>Triage inbox</h2>
+          <p class="muted">The Curator agent queues new open issues as <code>Task</code> nodes. Analyst agents
+            claim them concurrently (each claim is one write query, so a task is never taken twice), triage
+            them from the graph and write their findings back as edges.</p>
+        </div>
+        <div class="actions">
+          <button id="queue" type="button">Curator: queue 5 issues</button>
+          <button id="run" type="button" class="primary">Run 3 analysts</button>
+        </div>
+      </div>
+      <div id="inbox-toast" class="toast hidden"></div>
+      <div class="inbox-body">
+        <div id="tasks" class="tasks"></div>
+        <div class="evidence slim">
+          <div class="pane-head"><span>Task in the graph</span></div>
+          <div class="graph-wrap">
+            <div id="task-graph" class="graph"></div>
+            <div class="graph-empty" id="task-graph-empty">Select a task to see what the analyst linked to it.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-memory" class="tab">
+      <div class="memory-wrap">
+        <h2>Your memory</h2>
+        <p class="muted">Stored in the same graph as the knowledge:
+          <code>(User)-[:HAD]->(Session)-[:INCLUDES]->(Turn)-[:CITED]->(…)</code> and
+          <code>(User)-[:NOTED]->(Fact)</code>. Your id lives only in this browser.</p>
+        <div id="memory"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

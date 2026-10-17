@@ -33,6 +33,7 @@ class Tool:
     params: dict
     required: list[str]
     fn: Callable[..., ToolResult]
+    needs_user: bool = False  # the caller's user id is injected by the server, never chosen by the model
 
     def json_schema(self) -> dict:
         return {"type": "object", "properties": self.params, "required": self.required}
@@ -41,17 +42,23 @@ class Tool:
 CATALOGUE: dict[str, Tool] = {}
 
 
-def tool(name: str, description: str, params: dict, required: tuple = ()):
+def tool(name: str, description: str, params: dict, required: tuple = (), needs_user: bool = False):
     def register(fn: Callable[..., ToolResult]) -> Callable[..., ToolResult]:
-        CATALOGUE[name] = Tool(name, description, params, list(required), fn)
+        CATALOGUE[name] = Tool(name, description, params, list(required), fn, needs_user)
         return fn
     return register
 
 
-def run(g: Graph, name: str, args: dict) -> ToolResult:
+def run(g: Graph, name: str, args: dict, user: str | None = None) -> ToolResult:
     if name not in CATALOGUE:
         return ToolResult([], note=f"unknown tool {name}")
-    return CATALOGUE[name].fn(g, **args)
+    t = CATALOGUE[name]
+    args = {k: v for k, v in args.items() if k in t.params}  # ignore anything the model invented
+    if t.needs_user:
+        if not user:
+            return ToolResult([], note=f"{name} needs a signed-in user")
+        args["user"] = user
+    return t.fn(g, **args)
 
 
 def _q(g: Graph, cypher: str, **params) -> list[list]:
@@ -129,7 +136,9 @@ def search(g: Graph, query: str, repo: str | None = None, limit: int = 8) -> Too
 
 
 def _keyword_hits(g: Graph, query: str, repo: str | None) -> list[Node]:
-    words = [w for w in re.findall(r"[a-z0-9_]+", query.lower()) if w not in STOPWORDS and len(w) > 1]
+    # OR-ing many words lets long bodies match everything, so keep the first dozen distinct terms.
+    words = list(dict.fromkeys(w for w in re.findall(r"[a-z0-9_]+", query.lower())
+                               if w not in STOPWORDS and len(w) > 1))[:12]
     if not words:
         return []
     return [n for (n,) in _q(g, """CALL db.idx.fulltext.queryNodes('Ticket', $q) YIELD node, score
