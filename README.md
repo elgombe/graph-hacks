@@ -146,9 +146,11 @@ The live demo runs on [Railway](https://railway.com) (about 500 MB of RAM under 
 
 ```bash
 .venv/Scripts/python deploy/stage.py                     # copies only the deployable files to a temp folder
-railway up <staged folder> --new --name repo-brain --yes --detach
-railway variables --set "PORT=7860"                       # then add GEMINI_API_KEY in the dashboard
+railway up <staged folder> --new --name repo-brain --yes --detach    # first deploy creates the project
+railway variables --set "PORT=7860"                       # then add GEMINI_API_KEY on the service's Variables tab
 railway domain --port 7860
+# later deploys: run from inside the staged folder, naming the target explicitly
+railway up --project <project-id> --service <service-id> --environment <environment-id> --detach
 ```
 
 `deploy/push_space.py` does the same for a Hugging Face Docker Space (needs a PRO account).
