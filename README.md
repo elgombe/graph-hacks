@@ -10,6 +10,8 @@ always showing the path through the graph behind the answer.
 
 **Tracks:** Agents That Act on Connected Data · Agent Memory and Coordination · Company Brain
 
+**Live demo:** https://repo-brain-production.up.railway.app · MCP endpoint: `https://repo-brain-production.up.railway.app/mcp/`
+
 The demo graph is the public [FalkorDB org](https://github.com/FalkorDB) itself: 7 repos, last 12 months,
 about 40k nodes and 180k relationships.
 
@@ -127,6 +129,34 @@ The same tool catalogue is exposed over MCP, typed from the tools' JSON schemas:
   ```
 
 * streamable HTTP at `http://localhost:8000/mcp/` whenever `repobrain serve` is running.
+
+## Deploy: one container
+
+The [Dockerfile](Dockerfile) runs FalkorDB and the app in a single container (pinned to the FalkorDB build
+the graph was saved with), loading the graph from a snapshot at start-up:
+
+```bash
+.venv/Scripts/python deploy/snapshot.py   # graph -> snapshot/dump.rdb, via a throwaway FalkorDB; chat memory removed
+docker build -t repobrain .
+docker run -p 7860:7860 -e GEMINI_API_KEY=... repobrain    # http://localhost:7860
+```
+
+The live demo runs on [Railway](https://railway.com) (about 500 MB of RAM under load). The snapshot is gitignored and
+`.env` must never be uploaded, so deploys go from a clean staging folder:
+
+```bash
+.venv/Scripts/python deploy/stage.py                     # copies only the deployable files to a temp folder
+railway up <staged folder> --new --name repo-brain --yes --detach
+railway variables --set "PORT=7860"                       # then add GEMINI_API_KEY in the dashboard
+railway domain --port 7860
+```
+
+`deploy/push_space.py` does the same for a Hugging Face Docker Space (needs a PRO account).
+
+Because the public demo shares one free-tier Gemini key, the server rate-limits each visitor (8 questions per
+10 minutes), runs at most 3 agents at once, and serves a repeated fresh question from a 3-day cache (marked
+"cached" in the UI; the deployed graph is a fixed snapshot). Answers that used memory or took an action are
+never cached.
 
 ## Agent tools and the Cypher behind them
 

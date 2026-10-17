@@ -182,10 +182,20 @@ def _check_citations(answer: Answer) -> None:
     """Keep [[id]] citations that resolve to evidence nodes; flag the rest."""
     known = answer.evidence.nodes
 
+    lowered = {k.lower(): k for k in known}
+
     def normalise(cid: str) -> str | None:
         for candidate in (cid, f"@{cid}", cid.lower(), cid.lower().rstrip("/") + "/"):
             if candidate in known:
                 return candidate
+            if candidate.lower() in lowered:  # @Login vs @login
+                return lowered[candidate.lower()]
+        # Weaker models sometimes garble the repo part ("falkordb/ジュニア#2570"); accept the
+        # citation only if its ticket number matches exactly one ticket in the evidence.
+        if m := re.search(r"#(\d+)$", cid):
+            hits = [k for k in known if k.endswith(f"#{m.group(1)}")]
+            if len(hits) == 1:
+                return hits[0]
         return None
 
     def replace(m: re.Match) -> str:

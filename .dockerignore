@@ -1,0 +1,10 @@
+.git
+.venv
+.env
+.env.*
+.claude
+data
+**/__pycache__
+*.egg-info
+SUBMISSION.md
+PLAN.md

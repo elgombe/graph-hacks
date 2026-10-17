@@ -220,7 +220,8 @@ function ask(question) {
     bot.dataset.idx = idx;
     bot.innerHTML = `<div class="body">${renderAnswer(a.text || "(no answer)", nodes)}</div>
       <div class="meta">${outcomeBadge(a.outcome, a.unverified)}<span>${a.steps.length} tool calls</span>
-      <span>${a.evidence.nodes.length} nodes in evidence</span><span>${esc(a.model)}</span></div>`;
+      <span>${a.evidence.nodes.length} nodes in evidence</span><span>${esc(a.model)}</span>
+      ${a.cached ? `<span class="badge" title="Same question answered recently; served from cache to save the shared API quota">cached</span>` : ""}</div>`;
     bot.onclick = (ev) => {
       selectAnswer(idx);
       const chip = ev.target.closest(".cite");
@@ -278,7 +279,8 @@ async function inboxAction(button, url, describe) {
   button.disabled = true;
   try {
     const res = await fetch(url, { method: "POST" });
-    toast(res.ok ? describe(await res.json()) : `Failed: ${esc(await res.text())}`);
+    const body = await res.json().catch(() => null);
+    toast(res.ok ? describe(body) : esc(body?.detail || `Request failed (${res.status})`));
     await loadInbox();
   } finally { button.disabled = false; }
 }
